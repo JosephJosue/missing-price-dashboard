@@ -1,17 +1,12 @@
 """Central configuration for the pricing-coverage pipeline.
 
-All paths are resolved from the ``PRICING_BASE_DIR`` environment variable so
-the code never embeds a user- or machine-specific location. Set it once::
-
-    # Windows (PowerShell)
-    setx PRICING_BASE_DIR "C:\\Users\\<you>\\Philips\\PST Activities - No & Zero Pricing"
-
-    # macOS / Linux
-    export PRICING_BASE_DIR="$HOME/PST Activities - No & Zero Pricing"
+BASE_DIR points to the folder that contains the HOS/ and RF/ subfolders.
+Override it by setting the PRICING_BASE_DIR environment variable, or just
+edit the default path below to match your machine.
 
 The expected on-disk layout per server is::
 
-    <PRICING_BASE_DIR>/<SERVER>/
+    <BASE_DIR>/<SERVER>/
         I files/      input I-catalog spreadsheets
         B files/      input B-reference spreadsheets
         Output/       generated CSVs (created automatically)
@@ -25,14 +20,10 @@ from pathlib import Path
 # Servers the pipeline knows how to process.
 SERVERS = ("HOS", "RF")
 
-# Base directory holding one sub-folder per server. Defaults to a folder in the
-# user's home directory so the project runs out-of-the-box without editing code.
-BASE_DIR = Path(
-    os.environ.get(
-        "PRICING_BASE_DIR",
-        Path.home() / "PST Activities - No & Zero Pricing",
-    )
-).expanduser()
+# Edit the path below if you are not using the PRICING_BASE_DIR env var.
+_DEFAULT = r"C:\Users\320270203\OneDrive - Philips\PST Activities - No & Zero Pricing\BI Connector"
+
+BASE_DIR = Path(os.environ.get("PRICING_BASE_DIR", _DEFAULT))
 
 
 def server_paths(server: str) -> dict[str, Path]:
