@@ -46,11 +46,27 @@ def get_quarter(dt: datetime) -> str:
     return f"Q{(dt.month - 1) // 3 + 1}"
 
 
+# How a missing/blank value (no modality, no country, etc.) appears in the feed.
+# Junk rows for I51/I52/I53 have no modality (they are not in the reference list)
+# and I62 has no modality at all; set this to "N/A" for an explicit, hideable
+# slicer entry, or "" if you prefer a true blank.
+MISSING_VALUE = "N/A"
+
+# Textual forms of "missing" that can leak in from astype(str) or source files.
+_MISSING_TOKENS = {"", "nan", "none", "nat", "null"}
+
+
 def _column_as_str(df: pd.DataFrame, col: str | None) -> pd.Series:
-    """Return ``df[col]`` as strings, or an empty column if it's absent."""
-    if col and col in df.columns:
-        return df[col].astype(str)
-    return pd.Series("", index=df.index)
+    """Return ``df[col]`` as clean strings, mapping missing values to a token.
+
+    Replaces real NaN/None as well as their textual leftovers ("nan", "none",
+    ...) so they never reach the Power BI slicers as a literal ``nan``.
+    """
+    if not (col and col in df.columns):
+        return pd.Series(MISSING_VALUE, index=df.index)
+
+    s = df[col].fillna(MISSING_VALUE).astype(str).str.strip()
+    return s.mask(s.str.lower().isin(_MISSING_TOKENS), MISSING_VALUE)
 
 
 def read_catalog_outputs(output_root: Path, catalog: str, server: str) -> pd.DataFrame:
