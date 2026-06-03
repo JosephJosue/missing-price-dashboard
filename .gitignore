@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Generated data & logs (regenerated each run)
+Output/
+run_log_*.txt
+*.csv
+
+# Source spreadsheets should never be committed
+*.xlsx
+*.xls
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
