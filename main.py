@@ -20,7 +20,7 @@ from datetime import datetime
 
 import config
 from catalogs import run_all
-from dashboard_export import build_dashboard_feed
+from dashboard_export import build_attribute_detail, build_dashboard_feed
 
 
 def _configure_logging(server: str) -> None:
@@ -47,6 +47,7 @@ def run_server(server, country=None, modality=None) -> None:
     log.info("Run started for %s at %s", server, datetime.now())
     run_all(server, paths["i_files"], paths["b_files"], paths["output"], country, modality)
     build_dashboard_feed(paths["output"], server)
+    build_attribute_detail(paths["output"], server)
     log.info("Run completed for %s", server)
 
 

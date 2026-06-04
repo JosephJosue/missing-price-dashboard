@@ -6,7 +6,8 @@ Companion to `PowerBI_Build_Guide.md`. These measures target the **real pipeline
   Attribute_Code, Modality_Code, Run_Date, Run_Quarter, Run_Year`. → Overview aggregates.
 - **`RunHistory`** — pre-aggregated counts (appended each run). Columns: `Server, Run_Date, Run_Quarter,
   Run_Year, Catalog, Category, Count`. → Trend + real deltas.
-- **`AttributeDetail`** — native per-catalog rows incl. prices & I52 `FP/TP/LP`. → Detail page.
+- **`AttributeDetail`** — the trimmed `attribute_detail.csv`: `Server, Catalog, Category, Country,
+  Attribute_Code, Modality_Code, Base_Price, FP, TP, LP, Run_*`. → Detail page.
 - Dims: `DimCategory[Category, SortOrder, Color]`, `DimServer/Country/Catalog/Modality`.
 
 Put all measures on a dedicated **`_Measures`** table.
@@ -181,19 +182,21 @@ Detail Zero       = CALCULATE ( [Detail Row Count], AttributeDetail[Category] = 
 Detail Junk       = CALCULATE ( [Detail Row Count], AttributeDetail[Category] = "Junk Price" )
 ```
 
-Optional: only surface I52 FP/TP/LP columns when relevant (drives a "show I52 columns" toggle/bookmark):
+Optional: only surface FP/TP/LP columns when an FP/TP/LP catalog is in context (drives a "show FP/TP/LP"
+toggle/bookmark — I51 and I52 are the FP/TP/LP catalogs):
 
 ```DAX
-Has I52 Pricing =
+Has FPLP Pricing =
     CALCULATE (
         COUNTROWS ( AttributeDetail ),
-        AttributeDetail[Catalog] = "I52",
+        AttributeDetail[Catalog] IN { "I51", "I52" },
         NOT ISBLANK ( AttributeDetail[FP] )
     ) > 0
 ```
 
-> The `FP/TP/LP` (and base price) columns come straight from the native CSVs — display them as table
-> columns. They'll be blank for non-I52 / non-priced rows, which matches the source design.
+> `Base_Price` / `FP` / `TP` / `LP` arrive pre-normalized in `attribute_detail.csv` (the pipeline maps each
+> catalog's native price header onto these). Display them as table columns: I38/I53/I62 fill `Base_Price`,
+> I51/I52 fill `FP/TP/LP`; the others are blank — which matches the source design.
 
 ---
 

@@ -46,20 +46,32 @@ Font: **Segoe UI** (Power BI default). KPI value 28px bold, page title 18px semi
 
 `dashboard_export.py` writes, **per server**, into `<BASE_DIR>/<SERVER>/Output/`:
 
-| File | Location | Grain | Powers |
-|------|----------|-------|--------|
-| `dashboard_feed.csv` | `…/<SERVER>/Output/Dashboard/` | **one row per attribute** (Server, Catalog, Category, Country, Attribute_Code, Modality_Code, Run_Date, Run_Quarter, Run_Year) — overwritten each run | **Page 1 Overview** aggregates |
-| `run_history.csv` | `…/<SERVER>/Output/Dashboard/` | **pre-aggregated counts** (Server, Run_Date, Run_Quarter, Run_Year, Catalog, Category, Count) — appended each run | **Page 3 Trend** |
-| per-catalog category CSVs | `…/<SERVER>/Output/<CATALOG>/<CATALOG>_<suffix>.csv` (e.g. `I52_priced.csv`) — native columns incl. prices & I52 FP/TP/LP | one row per attribute, **native schema** | **Page 2 Attribute Detail** |
+All three live in `…/<SERVER>/Output/Dashboard/` and are written by `dashboard_export.py` each run:
+
+| File | Grain | Powers |
+|------|-------|--------|
+| `dashboard_feed.csv` | **one row per attribute** (Server, Catalog, Category, Country, Attribute_Code, Modality_Code, Run_Date, Run_Quarter, Run_Year) — overwritten each run | **Page 1 Overview** aggregates |
+| `run_history.csv` | **pre-aggregated counts** (Server, Run_Date, Run_Quarter, Run_Year, Catalog, Category, Count) — appended each run | **Page 3 Trend** |
+| `attribute_detail.csv` | **one row per attribute, trimmed**: Server, Catalog, Category, Country, Attribute_Code, Modality_Code, **Base_Price, FP, TP, LP**, Run_Date, Run_Quarter, Run_Year — overwritten each run | **Page 2 Attribute Detail** |
+
+> **Why `attribute_detail.csv` exists.** The raw per-catalog CSVs (`…/Output/<CATALOG>/<CATALOG>_<suffix>.csv`)
+> carry the prices, but some run to **150 MB+** — far too big to stream over SharePoint without timeouts.
+> So `build_attribute_detail()` trims them to just the detail-page columns (normalizing each catalog's native
+> price column onto `Base_Price` / `FP` / `TP` / `LP`) and writes one small file per server. Power BI reads
+> that instead of the giant native files. (The native CSVs remain for the per-catalog "download" links.)
 
 Two important facts that shape the model:
 
-- **`dashboard_feed.csv` is already "long".** It has a `Category` column with one row per attribute, so
-  there is **no unpivot step**. Counts come from `COUNTROWS`.
-- The feed carries only classification + identity (no prices). The **prices and I52 FP/TP/LP live in the
-  native per-catalog CSVs**, so the Detail page reads those directly.
+- **All three files are already "long".** Each has a `Category` column with one row per attribute (or, for
+  `run_history.csv`, per run/category), so there is **no unpivot step**. Overview counts come from `COUNTROWS`.
+- Because all three sit in `…/Output/Dashboard/`, each is just **two files** (one per server) to combine —
+  the same simple recipe for all three queries.
 
-The category file suffixes map to labels (from `CATEGORY_MAP`):
+Price-column normalization in `attribute_detail.csv` (from `catalogs.py`):
+`I38 → Base Price`, `I51/I52 → Attribute Value FP/TP/LP`, `I53 → Attribute Value Reference Uplift`,
+`I62 → Reference Price BU`. Catalogs with a single base price fill `Base_Price`; I51/I52 fill `FP/TP/LP`.
+
+The category labels come from `CATEGORY_MAP`:
 `priced → Priced`, `not_priced → Not Priced`, `zero_priced → Price in 0`, `junk_price → Junk Price`.
 Missing modality/country come through as the literal **`N/A`** (the pipeline's `MISSING_VALUE`).
 
@@ -117,52 +129,30 @@ column is again already in each file.
 > Because `run_history.csv` is **appended every run**, this table is your genuine time series — use it for
 > the Trend page and for real "vs previous quarter" KPI deltas (no hardcoded numbers needed).
 
-### 3.4 Query C — `AttributeDetail` (combine the native per-catalog CSVs)
+### 3.4 Query C — `AttributeDetail` (combine both `attribute_detail.csv`)
 
-This is the richer source for Page 2 — it has the **prices** and the **I52 FP/TP/LP** columns.
+Because the pipeline now emits a trimmed **`attribute_detail.csv`** per server, this is the **same simple
+two-file combine** as the feed — no per-catalog file wrangling, no 150 MB streaming, no timeouts.
 
-1. **Reference** the file list again → rename **`AttributeDetail`**.
-2. Filter to just the native category files. The simplest robust filter:
-   - `Extension` equals `.csv`, **and**
-   - `Name` does **not** equal `dashboard_feed.csv`, **and** `Name` does **not** equal `run_history.csv`.
-   That leaves files like `I38_priced.csv`, `I52_not_priced.csv`, etc., under each `…/Output/<CATALOG>/`.
-3. **Derive keys from the path/filename** (don't rely on combine to infer them). Add Custom Columns:
-   ```m
-   Server   = if Text.Contains([Folder Path], "/RF/") then "RF"
-              else if Text.Contains([Folder Path], "/HOS/") then "HOS" else "UNKNOWN"
-   Catalog  = Text.BeforeDelimiter([Name], "_")                       // "I52"
-   CatSuffix = Text.BeforeDelimiter(Text.AfterDelimiter([Name], "_", 0), ".csv")  // "not_priced"
-   Category = let m = [CatSuffix] in
-                if m = "priced" then "Priced"
-                else if m = "not_priced" then "Not Priced"
-                else if m = "zero_priced" then "Price in 0"
-                else if m = "junk_price" then "Junk Price" else m
-   ```
-   > Note: for suffixes with two underscores (`not_priced`, `zero_priced`, `junk_price`) the simpler
-   > `Text.AfterDelimiter([Name], "_")` already returns `not_priced.csv`; strip `.csv` with
-   > `Text.BeforeDelimiter(…, ".csv")`. The lookup above maps it to the display label.
-4. **Combine carefully — the native CSVs have different columns per catalog** (I38/I51/I52/I53 use
-   `Attribute Value Code` + `Modality Code`; I62 uses `CVG Code` and has no modality; I52 priced adds
-   FP/TP/LP). The auto "Combine Files" samples the *first* file and can drop columns that only exist in
-   others. To union **all** columns safely:
-   - After combining, click the **expand** control on the parsed table column and choose **“Load more”** so
-     Power BI scans every file's headers before you expand — tick **all** columns, untick "use original
-     column name as prefix".
-   - *Or* do it explicitly: add a column `Parsed = Csv.Document([Content], [Delimiter=",", Encoding=65001,
-     QuoteStyle=QuoteStyle.Csv])`, promote headers on the sample, then use **Table.Combine** which unions
-     columns and fills missing ones with `null`.
-5. **Normalize the key columns** so the page is catalog-agnostic. Add:
-   ```m
-   AttributeCode = if [Attribute Value Code] <> null then [Attribute Value Code] else [#"CVG Code"]
-   ```
-   Keep `Country`, `Modality Code` (null/`N/A` for I62), and whichever **price columns** exist in your
-   native files — e.g. a base price column, and `FP` / `TP` / `LP` for I52. Rename them to clean names
-   (`Base Price`, `FP`, `TP`, `LP`).
-   > I can't see your exact native price header names from the pipeline code — after the combine, look at
-   > the unioned column list and rename the price/FP/TP/LP columns to match the table in §6. Everything
-   > else (Server, Catalog, Category, Country, Attribute code, Modality) is already covered above.
-6. Set types: keep price/FP/TP/LP as **Text** if they can contain `—`, `$0.00`, or junk values like
-   `-9999`; add a numeric copy via `try Number.FromText(...) otherwise null` only if you need to sort by price.
+1. **Reference** the file list → rename **`AttributeDetail`**.
+2. **Filter `Name`** → equals `attribute_detail.csv` → **2 rows** (RF + HOS).
+3. **Combine** (the ⤓ icon on `Content`). The `Server`, `Catalog`, `Category`, prices, and run-stamp columns
+   are all already inside each file.
+4. **Set data types:**
+   - Text: `Server`, `Catalog`, `Category`, `Country`, `Attribute_Code`, `Modality_Code`
+   - **Decimal number:** `Base_Price`, `FP`, `TP`, `LP` (empty cells read as `null` — correct; only the
+     applicable price columns are filled per catalog)
+   - Whole number: `Run_Year`; Date: `Run_Date`; Text: `Run_Quarter`
+5. Keep `N/A` in `Modality_Code` (I62 has no modality) as a real value.
+
+That's it — you already have clean `Base_Price` / `FP` / `TP` / `LP` columns (normalized by the pipeline from
+each catalog's native header), so there's nothing to rename or coalesce.
+
+> **Fallback — reading the native per-catalog CSVs directly.** If you ever need a column the trimmed file
+> doesn't carry, you can still combine the raw `…/Output/<CATALOG>/<CATALOG>_<suffix>.csv` files, deriving
+> `Server`/`Catalog`/`Category` from the path + filename and unioning their differing schemas. That approach
+> (and the SharePoint-timeout workarounds) is documented in **Appendix A**. For the standard build, use the
+> trimmed `attribute_detail.csv` above.
 
 ### 3.5 Build dimension tables
 
@@ -291,27 +281,27 @@ Each shows: name + colored dot, big value, "▲/▼ delta vs prev qtr", "% of to
 
 ---
 
-## 7. Page 2 — Attribute Detail  *(source: `AttributeDetail`)*
+## 7. Page 2 — Attribute Detail  *(source: `AttributeDetail` = `attribute_detail.csv`)*
 
-Now backed by the native per-catalog CSVs, so prices and I52 FP/TP/LP are available.
+Backed by the trimmed detail file, so prices (`Base_Price`) and I51/I52 `FP/TP/LP` are ready-made columns.
 
 ### 7.1 Category tab strip
 - A **slicer** on `DimCategory[Category]`, **single-select**, **horizontal/tile** orientation; selected tile
-  fill = the category color. Add per-tab counts with a small multi-row card, or use 4 bookmark buttons for
-  the exact filled-pill look.
+  fill = the category color. Add per-tab counts with a small multi-row card (DAX §7), or use 4 bookmark
+  buttons for the exact filled-pill look.
 
 ### 7.2 Search + export
-- Add a **search-enabled slicer** on `AttributeDetail[AttributeCode]` (or use the table visual's built-in
+- Add a **search-enabled slicer** on `AttributeDetail[Attribute_Code]` (or use the table visual's built-in
   search). Place an **Export filtered list** button (the table "…" menu exports CSV).
 
 ### 7.3 The detail table
-- **Table** columns in order: `Country`, `AttributeCode` (Attribute Value Code), `Modality Code`,
-  `Base Price`, `Catalog`.
-- **I52 FP/TP/LP:** add `FP`, `TP`, `LP` columns (accent blue `#3b82f6`). They'll be populated only for I52
-  Priced rows and `null`/`—` elsewhere — that's expected. If you want them to appear *only* when the I52
-  catalog is selected, drive a bookmark off the Catalog slicer to swap a wider table in.
+- **Table** columns in order: `Country`, `Attribute_Code`, `Modality_Code`, `Base_Price`, `Catalog`.
+- **FP/TP/LP (I51/I52):** add `FP`, `TP`, `LP` columns (accent blue `#3b82f6`). They're populated only for
+  the FP/TP/LP catalogs and `null` elsewhere — that's expected. Catalogs with a single price (I38/I53/I62)
+  fill `Base_Price` instead. If you want FP/TP/LP to appear *only* when an FP/TP/LP catalog is selected,
+  drive a bookmark off the Catalog slicer to swap a wider table in.
 - Mono font for code columns; render `Catalog` as a blue pill via conditional formatting
-  (`#eef2ff` bg, `#4338ca` text).
+  (`#eef2ff` bg, `#4338ca` text). Format `Base_Price/FP/TP/LP` as currency.
 
 ### 7.4 Make it a real drill-through
 Add `Country` and `Category` to this page's **Drill-through** filter well, so right-clicking a bar/KPI on the
@@ -397,3 +387,60 @@ set the `DimServer` selection and swap each button's on/off style; bind each but
 | Quarterly trend (bars + line + area) | `RunHistory` | Line & clustered column / Area + constant line |
 | Country / Catalog / Modality filters | `DimCountry/Catalog/Modality` | Slicers |
 | Server RF/HOS toggle | `DimServer` | single-select slicer or bookmark buttons |
+
+---
+
+## Appendix A — Reading the raw per-catalog CSVs (fallback only)
+
+The standard build uses the pipeline's trimmed `attribute_detail.csv` (§3.4). Use this only if you need a
+native column that file doesn't carry. The raw files live at `…/<SERVER>/Output/<CATALOG>/<CATALOG>_<suffix>.csv`
+and have **different schemas per catalog** (I38/I51/I52/I53 use `Attribute Value Code` + `Modality Code`;
+I62 uses `CVG Code`, no modality; I51/I52 add the `Attribute Value FP/TP/LP` columns).
+
+**Avoid SharePoint timeouts.** Some of these files are **150 MB+**. Pulling them over the on-prem SharePoint
+REST API (`getfilebyserverrelativeurl/$value`) frequently times out, and column-pruning can't help (Power
+Query must download the whole binary first). Two mitigations:
+
+1. **Read from the OneDrive-synced local folder** instead of the SharePoint connector — a disk read, no REST:
+   ```m
+   Source = Folder.Files("C:\Users\<you>\OneDrive - Philips\PST Activities - No & Zero Pricing\BI Connector")
+   ```
+   With the Folder connector, paths use **backslashes**, so detect the server with `"\RF\"` / `"\HOS\"`.
+   (Note: a local path won't refresh in the Power BI Service without an on-prem data gateway.)
+2. **Read each file once** — wrap `[Content]` in `Binary.Buffer(...)` and skip the dynamic column scan by
+   passing a fixed column list to `Table.ExpandTableColumn` (it fills `null` for files lacking a column).
+
+**Derive keys + union the schemas** (the path/filename carry server/catalog/category, since the raw files
+don't):
+
+```m
+let
+    Source     = Folder.Files("C:\Users\<you>\OneDrive - Philips\PST Activities - No & Zero Pricing\BI Connector"),
+    OnlyCsv    = Table.SelectRows(Source, each [Extension] = ".csv"),
+    NativeOnly = Table.SelectRows(OnlyCsv, each
+                    Text.Contains([Folder Path], "Output") and not Text.Contains([Folder Path], "Dashboard")
+                    and not List.Contains({"attribute_detail.csv"}, [Name])),
+    AddServer  = Table.AddColumn(NativeOnly, "Server", each
+                    if Text.Contains([Folder Path], "\RF\") then "RF"
+                    else if Text.Contains([Folder Path], "\HOS\") then "HOS" else "UNKNOWN"),
+    AddCatalog = Table.AddColumn(AddServer, "Catalog", each Text.BeforeDelimiter([Name], "_")),
+    AddSuffix  = Table.AddColumn(AddCatalog, "CatSuffix", each Text.BeforeDelimiter(Text.AfterDelimiter([Name], "_"), ".csv")),
+    AddCat     = Table.AddColumn(AddSuffix, "Category", each
+                    let m = [CatSuffix] in
+                    if m="priced" then "Priced" else if m="not_priced" then "Not Priced"
+                    else if m="zero_priced" then "Price in 0" else if m="junk_price" then "Junk Price" else m),
+    AddData    = Table.AddColumn(AddCat, "Data", each
+                    Table.PromoteHeaders(
+                        Csv.Document(Binary.Buffer([Content]), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+                        [PromoteAllScalars=true])),
+    Keep       = Table.SelectColumns(AddData, {"Server","Catalog","Category","Data"}),
+    AllCols    = List.Distinct(List.Combine(List.Transform(Keep[Data], each Table.ColumnNames(_)))),
+    Expanded   = Table.ExpandTableColumn(Keep, "Data", AllCols),
+    AddCode    = Table.AddColumn(Expanded, "Attribute_Code", each
+                    if Record.HasFields(_, "Attribute Value Code") and [#"Attribute Value Code"] <> null
+                    then [#"Attribute Value Code"] else try [#"CVG Code"] otherwise null)
+in
+    AddCode
+```
+
+Watch the `Csv.Document` option spelling (`Delimiter`, not `Delimeter`) — a typo there errors every row.
