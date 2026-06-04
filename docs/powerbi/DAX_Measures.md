@@ -1,32 +1,35 @@
-# Pricing Coverage Dashboard — DAX Measures & Conditional Formatting
+# Pricing Coverage Dashboard — DAX Measures & Conditional Formatting (Real Data)
 
-Companion to `PowerBI_Build_Guide.md`. Copy these measures into your model (a dedicated
-`_Measures` table is recommended). Table/column names assume the model in §2 of the guide.
+Companion to `PowerBI_Build_Guide.md`. These measures target the **real pipeline model**:
 
-Conventions:
-- Fact `Summary[Server, Country, Catalog, Modality, Priced, NotPriced, PriceInZero, JunkPrice]`
-- Unpivoted `SummaryUnpivot[Server, Country, Catalog, Modality, Category, Count]`
-- `Quarters[Server, Label, Year, Q, PricedPct, NotPricedPct]`
-- `DimCategory[Category, SortOrder, Color]`
+- **`DashboardFeed`** — one row per attribute (snapshot). Columns: `Server, Catalog, Category, Country,
+  Attribute_Code, Modality_Code, Run_Date, Run_Quarter, Run_Year`. → Overview aggregates.
+- **`RunHistory`** — pre-aggregated counts (appended each run). Columns: `Server, Run_Date, Run_Quarter,
+  Run_Year, Catalog, Category, Count`. → Trend + real deltas.
+- **`AttributeDetail`** — native per-catalog rows incl. prices & I52 `FP/TP/LP`. → Detail page.
+- Dims: `DimCategory[Category, SortOrder, Color]`, `DimServer/Country/Catalog/Modality`.
+
+Put all measures on a dedicated **`_Measures`** table.
+
+> Key change vs the mock model: counts are **`COUNTROWS`** over the long feed (no `SUM` of pivoted
+> columns), and quarter deltas are computed from the **real `RunHistory`** instead of hardcoded numbers.
 
 ---
 
-## 1. Base counts
+## 1. Base counts (Overview — from `DashboardFeed`)
 
 ```DAX
-Priced       = SUM ( Summary[Priced] )
-Not Priced   = SUM ( Summary[NotPriced] )
-Zero Priced  = SUM ( Summary[PriceInZero] )
-Junk Price   = SUM ( Summary[JunkPrice] )
+Total Attrs  = COUNTROWS ( DashboardFeed )
 
-Total Attrs  = [Priced] + [Not Priced] + [Zero Priced] + [Junk Price]
+Priced       = CALCULATE ( [Total Attrs], DashboardFeed[Category] = "Priced" )
+Not Priced   = CALCULATE ( [Total Attrs], DashboardFeed[Category] = "Not Priced" )
+Zero Priced  = CALCULATE ( [Total Attrs], DashboardFeed[Category] = "Price in 0" )
+Junk Price   = CALCULATE ( [Total Attrs], DashboardFeed[Category] = "Junk Price" )
 ```
 
-For the unpivoted visuals (donut, stacked column, matrix):
-
-```DAX
-Category Count = SUM ( SummaryUnpivot[Count] )
-```
+> If you put `Category` on a visual's legend/axis (donut, stacked column), just use `[Total Attrs]` — the
+> visual slices it by category for you. The four explicit measures above are for the KPI cards and the
+> summary table where each category is its own column.
 
 ---
 
@@ -35,71 +38,98 @@ Category Count = SUM ( SummaryUnpivot[Count] )
 ```DAX
 Coverage % = DIVIDE ( [Priced], [Total Attrs] )
 
--- Row-context share for the heat matrix (% within the current Country row, across all categories)
+-- Within-row shares for the heat matrix (share of the current Country row)
 Priced %      = DIVIDE ( [Priced],      [Total Attrs] )
 Not Priced %  = DIVIDE ( [Not Priced],  [Total Attrs] )
 Zero Priced % = DIVIDE ( [Zero Priced], [Total Attrs] )
 Junk %        = DIVIDE ( [Junk Price],  [Total Attrs] )
 
--- Generic "% of grand total" used in KPI card footers
+-- "% of grand total" for KPI card footers (ignores the category filter, keeps slicers)
 Category % of Total =
-    DIVIDE ( [Category Count], CALCULATE ( [Category Count], ALLSELECTED ( DimCategory ) ) )
+    DIVIDE ( [Total Attrs], CALCULATE ( [Total Attrs], REMOVEFILTERS ( DimCategory ) ) )
+```
+
+Per-card footer percentages (one per KPI card):
+
+```DAX
+Priced % of Total     = DIVIDE ( [Priced],      CALCULATE ( [Total Attrs], REMOVEFILTERS ( DimCategory ) ) )
+Not Priced % of Total = DIVIDE ( [Not Priced],  CALCULATE ( [Total Attrs], REMOVEFILTERS ( DimCategory ) ) )
+Zero % of Total       = DIVIDE ( [Zero Priced], CALCULATE ( [Total Attrs], REMOVEFILTERS ( DimCategory ) ) )
+Junk % of Total       = DIVIDE ( [Junk Price],  CALCULATE ( [Total Attrs], REMOVEFILTERS ( DimCategory ) ) )
 ```
 
 ---
 
-## 3. KPI delta measures (vs previous quarter)
+## 3. Trend & KPI deltas (from `RunHistory` — real history)
 
-The original app uses fixed deltas. To reproduce the exact numbers, hardcode them:
+Helper columns on `RunHistory` (Data view → New column):
 
 ```DAX
-Priced Delta      = 2.3
-Not Priced Delta  = -1.4
-Zero Delta        = 0.6
-Junk Delta        = -0.8
+QSort  = RunHistory[Run_Year] * 10 + VALUE ( SUBSTITUTE ( RunHistory[Run_Quarter], "Q", "" ) )
+QLabel = RunHistory[Run_Quarter] & " '" & RIGHT ( FORMAT ( RunHistory[Run_Year], "0000" ), 2 )
+```
+Set `QLabel` **Sort by column → QSort**.
+
+Trend measures (use `Count`, the pre-aggregated total):
+
+```DAX
+Run Total      = SUM ( RunHistory[Count] )
+Run Priced     = CALCULATE ( [Run Total], RunHistory[Category] = "Priced" )
+Run Not Priced = CALCULATE ( [Run Total], RunHistory[Category] = "Not Priced" )
+
+Priced % (Q)     = DIVIDE ( [Run Priced],     [Run Total] )
+Not Priced % (Q) = DIVIDE ( [Run Not Priced], [Run Total] )
 ```
 
-To compute them dynamically from `Quarters` instead:
+Latest / previous quarter and deltas (computed, not hardcoded):
 
 ```DAX
-Latest Q Rank =
-    MAXX ( ALL ( Quarters ), Quarters[Year] * 10 + Quarters[Q] )
+Latest QSort =
+    CALCULATE ( MAX ( RunHistory[QSort] ), ALLSELECTED ( RunHistory ) )
 
 Latest Priced % =
-    CALCULATE ( MAX ( Quarters[PricedPct] ),
-        FILTER ( ALL ( Quarters ), Quarters[Year] * 10 + Quarters[Q] = [Latest Q Rank] ) )
+    CALCULATE ( [Priced % (Q)],
+        FILTER ( ALLSELECTED ( RunHistory ), RunHistory[QSort] = [Latest QSort] ) )
 
 Prev Priced % =
-    CALCULATE ( MAX ( Quarters[PricedPct] ),
-        FILTER ( ALL ( Quarters ), Quarters[Year] * 10 + Quarters[Q] = [Latest Q Rank] - 1 ) )
+    CALCULATE ( [Priced % (Q)],
+        FILTER ( ALLSELECTED ( RunHistory ), RunHistory[QSort] = [Latest QSort] - 1 ) )
 
 Priced Delta pp = ( [Latest Priced %] - [Prev Priced %] ) * 100
 
--- Same pattern for Not Priced:
+-- Not Priced (same pattern)
 Latest Not Priced % =
-    CALCULATE ( MAX ( Quarters[NotPricedPct] ),
-        FILTER ( ALL ( Quarters ), Quarters[Year] * 10 + Quarters[Q] = [Latest Q Rank] ) )
+    CALCULATE ( [Not Priced % (Q)],
+        FILTER ( ALLSELECTED ( RunHistory ), RunHistory[QSort] = [Latest QSort] ) )
+Prev Not Priced % =
+    CALCULATE ( [Not Priced % (Q)],
+        FILTER ( ALLSELECTED ( RunHistory ), RunHistory[QSort] = [Latest QSort] - 1 ) )
+Not Priced Delta pp = ( [Latest Not Priced %] - [Prev Not Priced %] ) * 100
 
-Avg Priced % = AVERAGEX ( ALL ( Quarters ), Quarters[PricedPct] )
+Avg Priced % =
+    AVERAGEX ( VALUES ( RunHistory[QSort] ), [Priced % (Q)] )
 ```
 
-Delta indicator label (▲/▼) for a card reference label:
+Delta labels & colors for card reference labels:
 
 ```DAX
 Priced Delta Label =
     VAR d = [Priced Delta pp]
-    RETURN IF ( d >= 0, "▲ " & FORMAT ( ABS ( d ), "0.0" ) & "pp",
-                        "▼ " & FORMAT ( ABS ( d ), "0.0" ) & "pp" )
+    RETURN IF ( d >= 0, "▲ ", "▼ " ) & FORMAT ( ABS ( d ), "0.0" ) & "pp"
 
+-- Priced: up is good
 Priced Delta Color = IF ( [Priced Delta pp] >= 0, "#2ECC71", "#E74C3C" )
+
+-- Not Priced: DOWN is good — flip it
+Not Priced Delta Color = IF ( [Not Priced Delta pp] <= 0, "#2ECC71", "#E74C3C" )
 ```
 
-> Note: for **Not Priced**, "good" is a *decrease*, so flip the color logic:
-> `IF ( [NP Delta] <= 0, "#2ECC71", "#E74C3C" )`.
+> The original Overview KPIs show a small "vs prev qtr" delta too. Reuse `[Priced Delta pp]` etc. there —
+> now driven by your real run history rather than the mock's fixed `+2.3 / -1.4 / +0.6 / -0.8`.
 
 ---
 
-## 4. Donut center label (total in thousands)
+## 4. Donut center label
 
 ```DAX
 Total Attrs (k) = FORMAT ( DIVIDE ( [Total Attrs], 1000 ), "0.0" ) & "k"
@@ -109,7 +139,7 @@ Total Attrs (k) = FORMAT ( DIVIDE ( [Total Attrs], 1000 ), "0.0" ) & "k"
 
 ## 5. Summary-table "Priced %" data-bar color rule
 
-Use as a **field-value** color in Conditional formatting → Data bars → "color based on field":
+Conditional formatting → Data bars → **color based on field** → use this measure:
 
 ```DAX
 Priced % Bar Color =
@@ -124,38 +154,52 @@ Priced % Bar Color =
 
 ## 6. Heat-matrix conditional formatting (color scale)
 
-Apply **Background color → Format style: Gradient** on each percentage measure. Match the
-original `cellStyle()` ramps (alpha 0.08 → 0.70 over the listed max):
+On each `%` measure: **Cell elements → Background color → Format style: Gradient**. Match the original
+`cellStyle()` ramps — set **Minimum = Number 0** and **Maximum = Number** (the value below) so the gradient
+saturates at the same point:
 
-| Column        | Measure          | Min color (low)      | Max color (high) | Max value |
-|---------------|------------------|----------------------|------------------|-----------|
-| Priced %      | `[Priced %]`     | `#EAF8F0` (≈8% green)| `#2ECC71`        | 0.85      |
-| Not Priced %  | `[Not Priced %]` | `#FDECEA`            | `#E74C3C`        | 0.50      |
-| Zero Priced % | `[Zero Priced %]`| `#FEF3E0`            | `#F39C12`        | 0.30      |
-| Junk %        | `[Junk %]`       | `#EEF0F1`            | `#95A5A6`        | 0.30      |
+| Column        | Measure          | Min color (low) | Max color (high) | Max value |
+|---------------|------------------|-----------------|------------------|-----------|
+| Priced %      | `[Priced %]`     | `#EAF8F0`       | `#2ECC71`        | 0.85      |
+| Not Priced %  | `[Not Priced %]` | `#FDECEA`       | `#E74C3C`        | 0.50      |
+| Zero Priced % | `[Zero Priced %]`| `#FEF3E0`       | `#F39C12`        | 0.30      |
+| Junk %        | `[Junk %]`       | `#EEF0F1`       | `#95A5A6`        | 0.30      |
 
-In each column's color-scale dialog set **Minimum = Number 0**, **Maximum = Number** (the value above),
-so the gradient saturates at the same point the React app does. Set **Center** off (two-color scale).
-
-Font color for readability on dark cells — add a separate **Font color** rule:
-
-```DAX
-Priced % Font = IF ( DIVIDE ( [Priced], [Total Attrs] ) > 0.55, "#1f2937", "#1f2937" )
-```
-
-(The original keeps text dark `#1f2937` on saturated cells.)
+Use a **two-color** scale (Center off). Keep cell font dark `#1f2937` for readability on saturated cells.
 
 ---
 
-## 7. Quarterly trend — target line
+## 7. Attribute Detail measures (from `AttributeDetail`)
 
-For the "Not Priced %" detail chart, add an **Analytics → Constant line** at `0.18`
-labeled `target ≤ 18%`, color `#9ca3af`, dashed.
+```DAX
+Detail Row Count = COUNTROWS ( AttributeDetail )
+
+-- Per-category counts for the tab strip pills
+Detail Priced     = CALCULATE ( [Detail Row Count], AttributeDetail[Category] = "Priced" )
+Detail Not Priced = CALCULATE ( [Detail Row Count], AttributeDetail[Category] = "Not Priced" )
+Detail Zero       = CALCULATE ( [Detail Row Count], AttributeDetail[Category] = "Price in 0" )
+Detail Junk       = CALCULATE ( [Detail Row Count], AttributeDetail[Category] = "Junk Price" )
+```
+
+Optional: only surface I52 FP/TP/LP columns when relevant (drives a "show I52 columns" toggle/bookmark):
+
+```DAX
+Has I52 Pricing =
+    CALCULATE (
+        COUNTROWS ( AttributeDetail ),
+        AttributeDetail[Catalog] = "I52",
+        NOT ISBLANK ( AttributeDetail[FP] )
+    ) > 0
+```
+
+> The `FP/TP/LP` (and base price) columns come straight from the native CSVs — display them as table
+> columns. They'll be blank for non-I52 / non-priced rows, which matches the source design.
 
 ---
 
 ## 8. Sorting
 
-- Mark `DimCategory[SortOrder]` (1=Priced, 2=Not Priced, 3=Zero, 4=Junk) as **Sort by column** for `Category`
-  so legends and tabs always render in the canonical order.
-- Sort `Quarters[Label]` by `Year * 10 + Q` (create that as a calculated column `QSort`).
+- `DimCategory[Category]` → **Sort by column → SortOrder** (1 Priced, 2 Not Priced, 3 Price in 0, 4 Junk Price).
+- `RunHistory[QLabel]` → **Sort by column → QSort**.
+- This keeps every legend, tab strip, and trend axis in canonical order.
+```
